@@ -138,7 +138,7 @@ class OlistDataLoaderSimple:
             # Créer la base de données
             self.clickhouse_client.command("CREATE DATABASE IF NOT EXISTS ecommerce")
             
-            # Créer la table simplifiée
+            # Créer la table enrichie
             self.clickhouse_client.command("""
                 CREATE TABLE IF NOT EXISTS ecommerce.sales_fact (
                     order_id String,
@@ -147,26 +147,55 @@ class OlistDataLoaderSimple:
                     order_purchase_timestamp DateTime,
                     order_status String,
                     price Float64,
-                    freight_value Float64
+                    freight_value Float64,
+                    customer_state String,
+                    product_category String,
+                    review_score UInt8,
+                    payment_type String
                 )
                 ENGINE = MergeTree()
                 ORDER BY (order_purchase_timestamp, order_id)
             """)
             
-            # Préparer les données (limité à 1000 lignes)
+            # Préparer les données enrichies (limité à 1000 orders)
             df_sales = self.df_orders.head(1000).merge(
                 self.df_order_items, 
                 on='order_id', 
                 how='left'
-            )[[
+            ).merge(
+                self.df_customers[['customer_id', 'customer_state']],
+                on='customer_id',
+                how='left'
+            ).merge(
+                self.df_products[['product_id', 'product_category_name']],
+                on='product_id',
+                how='left'
+            ).merge(
+                self.df_reviews[['order_id', 'review_score']],
+                on='order_id',
+                how='left'
+            ).merge(
+                self.df_order_payments[['order_id', 'payment_type']].drop_duplicates('order_id'),
+                on='order_id',
+                how='left'
+            )
+            
+            df_sales = df_sales[[
                 'order_id', 'customer_id', 'product_id',
                 'order_purchase_timestamp', 'order_status', 
-                'price', 'freight_value'
-            ]]
+                'price', 'freight_value',
+                'customer_state', 'product_category_name',
+                'review_score', 'payment_type'
+            ]].rename(columns={'product_category_name': 'product_category'})
             
-            # Conversion des dates
+            # Conversion des dates et nettoyage
             df_sales['order_purchase_timestamp'] = pd.to_datetime(df_sales['order_purchase_timestamp'], errors='coerce')
-            df_sales = df_sales.fillna({'price': 0, 'freight_value': 0, 'product_id': 'unknown'})
+            df_sales = df_sales.fillna({
+                'price': 0, 'freight_value': 0, 'product_id': 'unknown',
+                'customer_state': 'unknown', 'product_category': 'unknown',
+                'review_score': 0, 'payment_type': 'unknown'
+            })
+            df_sales['review_score'] = df_sales['review_score'].astype(int)
             
             # Insert
             self.clickhouse_client.insert_df('ecommerce.sales_fact', df_sales)
